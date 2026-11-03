@@ -732,6 +732,60 @@ function computeBalances(data) {
   };
 }
 
+// ═══ Monthly trends: real money in/out (card purchases apart) + card ledger ═══
+function computeTrends(data) {
+  const months = {};
+  const M = p => months[p] || (months[p] = {
+    period: p,
+    ingresos: 0,
+    gastos: 0,
+    pagoTarjeta: 0,
+    compraTarjeta: 0,
+    cardDelta: 0
+  });
+  const mine = w => !w || w === "Mío";
+  const start = data.cardStart || "";
+  const inCard = x => !start || x.date > start;
+  (data.incomes || []).filter(i => i.owner === "Mío").forEach(i => {
+    const p = getPeriod(i.date);
+    if (p) M(p).ingresos += num(i.amount);
+  });
+  (data.expenses || []).filter(e => mine(e.paidWith)).forEach(e => {
+    const p = getPeriod(e.date);
+    if (!p) return;
+    if (e.method === CARD) {
+      M(p).compraTarjeta += num(e.amount);
+      if (inCard(e)) M(p).cardDelta += num(e.amount);
+    } else M(p).gastos += num(e.amount);
+  });
+  (data.loans || []).filter(l => l.method === CARD && inCard(l)).forEach(l => {
+    const p = getPeriod(l.date);
+    if (p) M(p).cardDelta += num(l.amount);
+  });
+  (data.cardPayments || []).filter(inCard).forEach(c => {
+    const p = getPeriod(c.date);
+    if (!p) return;
+    M(p).cardDelta -= num(c.amount);
+    if (c.kind === "pago" && mine(c.paidWith)) M(p).pagoTarjeta += num(c.amount);
+  });
+  (data.adjustments || []).filter(a => a.account === "Tarjeta").forEach(a => {
+    const p = getPeriod(a.date);
+    if (p) M(p).cardDelta += num(a.amount);
+  });
+  let debt = 0;
+  return Object.values(months).sort((a, b) => a.period.localeCompare(b.period)).map(m => {
+    debt += m.cardDelta;
+    const salidas = m.gastos + m.pagoTarjeta;
+    return {
+      ...m,
+      salidas,
+      balance: m.ingresos - salidas,
+      deudaFin: debt,
+      label: periodLabel(m.period)
+    };
+  });
+}
+
 // ═══════════ ICONS ═══════════
 const ICONS = {
   home: "M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z",
@@ -2252,109 +2306,27 @@ function LoansView({
 }
 
 // ═══════════ TRENDS ═══════════
-function TrendsView({
-  trends: allTrends
+function LineChart({
+  rows,
+  series,
+  height = 280
 }) {
-  const trends = allTrends.filter(t => t.period <= currentPeriod);
   const [hover, setHover] = useState(null);
-  const fmtShort = n => {
-    const a = Math.abs(n);
-    return (n < 0 ? "-" : "") + (a >= 1e6 ? `$${(a / 1e6).toFixed(1)}M` : a >= 1e3 ? `$${Math.round(a / 1e3)}k` : `$${Math.round(a)}`);
-  };
-  if (trends.length === 0) return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "page-h"
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "eyebrow"
-  }, "Tendencias"), /*#__PURE__*/React.createElement("h1", null, "Tu dinero en el tiempo"))), /*#__PURE__*/React.createElement("div", {
-    className: "card"
-  }, /*#__PURE__*/React.createElement(Empty, {
-    title: "Aún no hay datos",
-    text: "Registra ingresos y gastos para ver tus tendencias."
-  })));
-  const recent = trends.slice(-12);
-  const totalIng = trends.reduce((s, m) => s + m.ingresos, 0),
-    totalGas = trends.reduce((s, m) => s + m.gastos, 0);
-  const avgGas = Math.round(totalGas / trends.length);
-  const maxGas = trends.reduce((mx, m) => m.gastos > mx.gastos ? m : mx, trends[0]);
   const W = 720,
-    H = 280,
-    pl = 52,
+    H = height,
+    pl = 56,
     pr = 14,
     pt = 14,
     pb = 30,
     pw = W - pl - pr,
     ph = H - pt - pb;
-  const maxV = Math.max(1, ...recent.map(m => Math.max(m.ingresos, m.gastos)));
+  const maxV = Math.max(1, ...rows.flatMap(r => series.map(s => r[s.key])));
   const step = Math.pow(10, Math.floor(Math.log10(maxV))) / 2;
   const top = Math.ceil(maxV / step) * step;
-  const x = i => pl + (recent.length === 1 ? pw / 2 : i / (recent.length - 1) * pw);
-  const y = v => pt + ph - v / top * ph;
-  const path = k => recent.map((m, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(m[k]).toFixed(1)}`).join(" ");
-  const area = k => `${path(k)} L${x(recent.length - 1)} ${pt + ph} L${x(0)} ${pt + ph}Z`;
-  const BW = 440,
-    BH = 240,
-    bpl = 54,
-    bpr = 10,
-    bpt = 14,
-    bpb = 30,
-    bph = BH - bpt - bpb,
-    bpw = BW - bpl - bpr;
-  const maxB = Math.max(1, ...recent.map(m => Math.abs(m.balance)));
-  const bw = Math.min(30, bpw / recent.length * 0.6);
-  const bx = i => bpl + (i + 0.5) / recent.length * bpw;
-  const by = v => bpt + bph / 2 - v / maxB * (bph / 2);
-  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "page-h"
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    className: "eyebrow"
-  }, "Tendencias"), /*#__PURE__*/React.createElement("h1", null, "Tu dinero en el tiempo"))), /*#__PURE__*/React.createElement("div", {
-    className: "grid stats4",
-    style: {
-      gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-      marginBottom: 16
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stat"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stat-l"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sw bg-inc"
-  }), "Ingresos (histórico)"), /*#__PURE__*/React.createElement("div", {
-    className: "stat-v num tone-inc"
-  }, fmt(totalIng))), /*#__PURE__*/React.createElement("div", {
-    className: "stat"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stat-l"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "sw bg-exp"
-  }), "Gastos (histórico)"), /*#__PURE__*/React.createElement("div", {
-    className: "stat-v num tone-exp"
-  }, fmt(totalGas))), /*#__PURE__*/React.createElement("div", {
-    className: "stat"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stat-l"
-  }, "Gasto promedio / mes"), /*#__PURE__*/React.createElement("div", {
-    className: "stat-v num"
-  }, fmt(avgGas))), /*#__PURE__*/React.createElement("div", {
-    className: "stat"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "stat-l"
-  }, "Mes de más gasto"), /*#__PURE__*/React.createElement("div", {
-    className: "stat-v num"
-  }, maxGas.label))), /*#__PURE__*/React.createElement("div", {
-    className: "card",
-    style: {
-      marginBottom: 16
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "card-h"
-  }, /*#__PURE__*/React.createElement("h3", null, "Ingresos vs gastos"), /*#__PURE__*/React.createElement("div", {
-    className: "legend"
-  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("i", {
-    className: "sw bg-inc"
-  }), "Ingresos"), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("i", {
-    className: "sw bg-exp"
-  }), "Gastos"))), /*#__PURE__*/React.createElement("div", {
+  const x = i => pl + (rows.length === 1 ? pw / 2 : i / (rows.length - 1) * pw);
+  const y = v => pt + ph - Math.max(0, v) / top * ph;
+  const path = k => rows.map((r, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(r[k]).toFixed(1)}`).join(" ");
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       position: "relative"
     },
@@ -2367,43 +2339,7 @@ function TrendsView({
       height: "auto",
       display: "block"
     }
-  }, /*#__PURE__*/React.createElement("defs", null, /*#__PURE__*/React.createElement("linearGradient", {
-    id: "gI",
-    x1: "0",
-    y1: "0",
-    x2: "0",
-    y2: "1"
-  }, /*#__PURE__*/React.createElement("stop", {
-    offset: "0",
-    style: {
-      stopColor: "var(--inc)",
-      stopOpacity: .22
-    }
-  }), /*#__PURE__*/React.createElement("stop", {
-    offset: "1",
-    style: {
-      stopColor: "var(--inc)",
-      stopOpacity: 0
-    }
-  })), /*#__PURE__*/React.createElement("linearGradient", {
-    id: "gE",
-    x1: "0",
-    y1: "0",
-    x2: "0",
-    y2: "1"
-  }, /*#__PURE__*/React.createElement("stop", {
-    offset: "0",
-    style: {
-      stopColor: "var(--exp)",
-      stopOpacity: .18
-    }
-  }), /*#__PURE__*/React.createElement("stop", {
-    offset: "1",
-    style: {
-      stopColor: "var(--exp)",
-      stopOpacity: 0
-    }
-  }))), [0, .25, .5, .75, 1].map(f => /*#__PURE__*/React.createElement("g", {
+  }, [0, .25, .5, .75, 1].map(f => /*#__PURE__*/React.createElement("g", {
     key: f
   }, /*#__PURE__*/React.createElement("line", {
     className: "gl",
@@ -2416,60 +2352,42 @@ function TrendsView({
     x: pl - 8,
     y: y(top * f) + 4,
     textAnchor: "end"
-  }, fmtShort(top * f)))), recent.map((m, i) => /*#__PURE__*/React.createElement("text", {
-    key: m.period,
+  }, fmtShort(top * f)))), rows.map((r, i) => /*#__PURE__*/React.createElement("text", {
+    key: r.period,
     x: x(i),
     y: H - 8,
     textAnchor: "middle"
-  }, m.label.split(" ")[0])), /*#__PURE__*/React.createElement("path", {
-    d: area("ingresos"),
-    fill: "url(#gI)"
-  }), /*#__PURE__*/React.createElement("path", {
-    d: area("gastos"),
-    fill: "url(#gE)"
-  }), /*#__PURE__*/React.createElement("path", {
-    d: path("ingresos"),
-    fill: "none",
-    style: {
-      stroke: "var(--inc)"
-    },
-    strokeWidth: "2.5",
-    strokeLinejoin: "round"
-  }), /*#__PURE__*/React.createElement("path", {
-    d: path("gastos"),
-    fill: "none",
-    style: {
-      stroke: "var(--exp)"
-    },
-    strokeWidth: "2.5",
-    strokeLinejoin: "round"
-  }), hover != null && /*#__PURE__*/React.createElement("line", {
+  }, r.label.split(" ")[0])), hover != null && /*#__PURE__*/React.createElement("line", {
     x1: x(hover),
     x2: x(hover),
     y1: pt,
     y2: pt + ph,
     className: "zero",
     strokeDasharray: "2 3"
-  }), recent.map((m, i) => /*#__PURE__*/React.createElement("g", {
+  }), series.map(s => /*#__PURE__*/React.createElement("path", {
+    key: s.key,
+    d: path(s.key),
+    fill: "none",
+    style: {
+      stroke: s.color
+    },
+    strokeWidth: "2.5",
+    strokeLinejoin: "round",
+    strokeDasharray: s.dash || ""
+  })), rows.map((r, i) => /*#__PURE__*/React.createElement("g", {
     key: "d" + i
-  }, /*#__PURE__*/React.createElement("circle", {
+  }, series.map(s => /*#__PURE__*/React.createElement("circle", {
+    key: s.key,
     cx: x(i),
-    cy: y(m.ingresos),
+    cy: y(r[s.key]),
     r: hover === i ? 5 : 3.5,
     style: {
-      fill: "var(--inc)"
+      fill: s.color
     }
-  }), /*#__PURE__*/React.createElement("circle", {
-    cx: x(i),
-    cy: y(m.gastos),
-    r: hover === i ? 5 : 3.5,
-    style: {
-      fill: "var(--exp)"
-    }
-  }), /*#__PURE__*/React.createElement("rect", {
-    x: x(i) - pw / recent.length / 2,
+  })), /*#__PURE__*/React.createElement("rect", {
+    x: x(i) - pw / rows.length / 2,
     y: pt,
-    width: pw / recent.length,
+    width: pw / rows.length,
     height: ph,
     fill: "transparent",
     onMouseEnter: () => setHover(i),
@@ -2478,31 +2396,35 @@ function TrendsView({
     className: "tip",
     style: {
       left: `${x(hover) / W * 100}%`,
-      top: `${Math.min(y(recent[hover].ingresos), y(recent[hover].gastos)) / H * 100}%`
+      top: `${Math.min(...series.map(s => y(rows[hover][s.key]))) / H * 100}%`
     }
-  }, recent[hover].label, /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
-    className: "num",
-    style: {
-      color: "var(--inc-soft)"
-    }
-  }, "+", fmt(recent[hover].ingresos)), /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
-    className: "num",
-    style: {
-      color: "var(--exp-soft)"
-    }
-  }, "−", fmt(recent[hover].gastos)))), trends.length > 12 && /*#__PURE__*/React.createElement("div", {
-    className: "hint"
-  }, "Mostrando los últimos 12 meses.")), /*#__PURE__*/React.createElement("div", {
-    className: "grid grid-2"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "card"
-  }, /*#__PURE__*/React.createElement("div", {
-    className: "card-h"
-  }, /*#__PURE__*/React.createElement("h3", null, "Balance mensual"), /*#__PURE__*/React.createElement("span", {
-    className: "sub"
-  }, "Ingresos − gastos")), /*#__PURE__*/React.createElement("svg", {
+  }, rows[hover].label, series.map(s => /*#__PURE__*/React.createElement("div", {
+    key: s.key,
+    className: "num"
+  }, s.label, ": ", fmt(rows[hover][s.key])))));
+}
+function BarsChart({
+  rows,
+  bars,
+  height = 260,
+  signed
+}) {
+  const W = 440,
+    H = height,
+    pl = 52,
+    pr = 14,
+    pt = 14,
+    pb = 30,
+    pw = W - pl - pr,
+    ph = H - pt - pb;
+  const maxV = Math.max(1, ...rows.flatMap(r => bars.map(b => Math.abs(r[b.key]))));
+  const zeroY = signed ? pt + ph / 2 : pt + ph;
+  const scale = signed ? ph / 2 / maxV : ph / maxV;
+  const slot = pw / rows.length,
+    bw = Math.min(26, slot * 0.7 / bars.length);
+  return /*#__PURE__*/React.createElement("svg", {
     className: "chart",
-    viewBox: `0 0 ${BW} ${BH}`,
+    viewBox: `0 0 ${W} ${H}`,
     style: {
       width: "100%",
       height: "auto",
@@ -2510,34 +2432,184 @@ function TrendsView({
     }
   }, /*#__PURE__*/React.createElement("line", {
     className: "zero",
-    x1: bpl,
-    x2: BW - bpr,
-    y1: by(0),
-    y2: by(0)
+    x1: pl,
+    x2: W - pr,
+    y1: zeroY,
+    y2: zeroY
   }), /*#__PURE__*/React.createElement("text", {
-    x: bpl - 8,
-    y: by(maxB) + 4,
+    x: pl - 8,
+    y: zeroY - maxV * scale + 4,
     textAnchor: "end"
-  }, fmtShort(maxB)), /*#__PURE__*/React.createElement("text", {
-    x: bpl - 8,
-    y: by(-maxB) + 4,
+  }, fmtShort(maxV)), signed && /*#__PURE__*/React.createElement("text", {
+    x: pl - 8,
+    y: zeroY + maxV * scale + 4,
     textAnchor: "end"
-  }, fmtShort(-maxB)), recent.map((m, i) => /*#__PURE__*/React.createElement("g", {
-    key: m.period
-  }, /*#__PURE__*/React.createElement("rect", {
-    x: bx(i) - bw / 2,
-    y: Math.min(by(m.balance), by(0)),
-    width: bw,
-    height: Math.max(2, Math.abs(by(m.balance) - by(0))),
-    rx: "5",
+  }, fmtShort(-maxV)), rows.map((r, i) => {
+    const cx = pl + (i + 0.5) * slot;
+    return /*#__PURE__*/React.createElement("g", {
+      key: r.period
+    }, bars.map((b, j) => {
+      const v = r[b.key],
+        hgt = Math.max(2, Math.abs(v) * scale),
+        bx = cx - bars.length * bw / 2 + j * bw;
+      const fill = typeof b.color === "function" ? b.color(v) : b.color;
+      return /*#__PURE__*/React.createElement("rect", {
+        key: b.key,
+        x: bx + 1,
+        y: v >= 0 ? zeroY - hgt : zeroY,
+        width: bw - 2,
+        height: hgt,
+        rx: "4",
+        style: {
+          fill
+        }
+      }, /*#__PURE__*/React.createElement("title", null, `${r.label} · ${b.label}: ${fmt(v)}`));
+    }), /*#__PURE__*/React.createElement("text", {
+      x: cx,
+      y: H - 8,
+      textAnchor: "middle"
+    }, r.label.split(" ")[0]));
+  }));
+}
+const fmtShort = n => {
+  const a = Math.abs(n);
+  return (n < 0 ? "-" : "") + (a >= 1e6 ? `$${(a / 1e6).toFixed(1)}M` : a >= 1e3 ? `$${Math.round(a / 1e3)}k` : `$${Math.round(a)}`);
+};
+const Legend = ({
+  items
+}) => /*#__PURE__*/React.createElement("div", {
+  className: "legend"
+}, items.map(([l, c, dash]) => /*#__PURE__*/React.createElement("span", {
+  key: l
+}, /*#__PURE__*/React.createElement("i", {
+  className: "sw",
+  style: {
+    background: c,
+    opacity: dash ? .6 : 1
+  }
+}), l)));
+function TrendsView({
+  trends: allTrends,
+  cardDebt
+}) {
+  const trends = allTrends.filter(t => t.period <= currentPeriod);
+  if (trends.length === 0) return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "page-h"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "eyebrow"
+  }, "Tendencias"), /*#__PURE__*/React.createElement("h1", null, "Tu dinero en el tiempo"))), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement(Empty, {
+    title: "Aún no hay datos",
+    text: "Registra ingresos y gastos para ver tus tendencias."
+  })));
+  const recent = trends.slice(-12);
+  const totIn = trends.reduce((s, m) => s + m.ingresos, 0),
+    totOut = trends.reduce((s, m) => s + m.salidas, 0);
+  const closed = trends.filter(t => t.period < currentPeriod);
+  const avgOut = closed.length ? Math.round(closed.reduce((s, m) => s + m.salidas, 0) / closed.length) : 0;
+  const cardRows = recent.filter(r => r.period >= "2026-03" || r.compraTarjeta || r.pagoTarjeta);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "page-h"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "eyebrow"
+  }, "Tendencias"), /*#__PURE__*/React.createElement("h1", null, "Tu dinero en el tiempo"))), /*#__PURE__*/React.createElement("div", {
+    className: "grid",
     style: {
-      fill: m.balance >= 0 ? "var(--inc)" : "var(--exp)"
+      gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+      marginBottom: 16
     }
-  }), /*#__PURE__*/React.createElement("text", {
-    x: bx(i),
-    y: BH - 8,
-    textAnchor: "middle"
-  }, m.label.split(" ")[0]))))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "stat-l"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "sw bg-inc"
+  }), "Te entró (total)"), /*#__PURE__*/React.createElement("div", {
+    className: "stat-v num tone-inc"
+  }, fmt(totIn))), /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "stat-l"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "sw bg-exp"
+  }), "Salió de tu bolsillo"), /*#__PURE__*/React.createElement("div", {
+    className: "stat-v num tone-exp"
+  }, fmt(totOut))), /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "stat-l"
+  }, "Salida promedio / mes"), /*#__PURE__*/React.createElement("div", {
+    className: "stat-v num"
+  }, fmt(avgOut))), /*#__PURE__*/React.createElement("div", {
+    className: "stat"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "stat-l"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "sw bg-card"
+  }), "Deuda tarjeta hoy"), /*#__PURE__*/React.createElement("div", {
+    className: "stat-v num tone-card"
+  }, fmt(cardDebt)))), /*#__PURE__*/React.createElement("div", {
+    className: "card",
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h"
+  }, /*#__PURE__*/React.createElement("h3", null, "Tu plata real: entró vs. salió"), /*#__PURE__*/React.createElement(Legend, {
+    items: [["Entró", "var(--inc)"], ["Salió", "var(--exp)"]]
+  })), /*#__PURE__*/React.createElement(LineChart, {
+    rows: recent,
+    series: [{
+      key: "ingresos",
+      label: "Entró",
+      color: "var(--inc)"
+    }, {
+      key: "salidas",
+      label: "Salió",
+      color: "var(--exp)"
+    }]
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "\"Salió\" es lo que de verdad dejó tus cuentas: gastos con tu plata + lo que le pagaste a la tarjeta. Las compras a cuotas no cuentan aquí hasta que las pagas.")), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-2",
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h"
+  }, /*#__PURE__*/React.createElement("h3", null, "¿Te sobró o te faltó?"), /*#__PURE__*/React.createElement("span", {
+    className: "sub"
+  }, "entró − salió")), /*#__PURE__*/React.createElement(BarsChart, {
+    rows: recent,
+    signed: true,
+    bars: [{
+      key: "balance",
+      label: "Balance",
+      color: v => v >= 0 ? "var(--inc)" : "var(--exp)"
+    }]
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "card"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "card-h"
+  }, /*#__PURE__*/React.createElement("h3", null, "Tarjeta de crédito"), /*#__PURE__*/React.createElement(Legend, {
+    items: [["Compraste", "var(--card)"], ["Pagaste", "var(--inc)"]]
+  })), /*#__PURE__*/React.createElement(BarsChart, {
+    rows: cardRows,
+    bars: [{
+      key: "compraTarjeta",
+      label: "Compraste",
+      color: "var(--card)"
+    }, {
+      key: "pagoTarjeta",
+      label: "Pagaste",
+      color: "var(--inc)"
+    }]
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "hint"
+  }, "Si compras más de lo que pagas, la deuda sube. Deuda al cierre de cada mes en el detalle de abajo."))), /*#__PURE__*/React.createElement("div", {
     className: "card"
   }, /*#__PURE__*/React.createElement("div", {
     className: "card-h"
@@ -2552,9 +2624,16 @@ function TrendsView({
     className: "tone-inc"
   }, "+", fmt(m.ingresos)), " · ", /*#__PURE__*/React.createElement("span", {
     className: "tone-exp"
-  }, "−", fmt(m.gastos)))), /*#__PURE__*/React.createElement("div", {
+  }, "−", fmt(m.salidas)), m.pagoTarjeta > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, " (tarjeta ", fmt(m.pagoTarjeta), ")")), (m.compraTarjeta > 0 || m.deudaFin > 0) && /*#__PURE__*/React.createElement("span", {
+    className: "num",
+    style: {
+      display: "block"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "tone-card"
+  }, "Tarjeta: compras ", fmt(m.compraTarjeta), " · deuda ", fmt(m.deudaFin)))), /*#__PURE__*/React.createElement("div", {
     className: "amt num " + (m.balance >= 0 ? "tone-inc" : "tone-exp")
-  }, m.balance >= 0 ? "+" : "−", fmt(Math.abs(m.balance))))))));
+  }, m.balance >= 0 ? "+" : "−", fmt(Math.abs(m.balance)))))));
 }
 
 // ═══════════ SETTINGS ═══════════
@@ -3054,9 +3133,11 @@ function Dashboard({
   const m = trends.find(t => t.period === period) || {
     ingresos: 0,
     gastos: 0,
+    pagoTarjeta: 0,
+    salidas: 0,
     balance: 0
   };
-  const ratio = m.ingresos > 0 ? Math.min(100, m.gastos / m.ingresos * 100) : m.gastos > 0 ? 100 : 0;
+  const ratio = m.ingresos > 0 ? Math.min(100, m.salidas / m.ingresos * 100) : m.salidas > 0 ? 100 : 0;
   const cats = Object.entries(stats.byCategory || {}).filter(([, v]) => v.total > 0).sort((a, b) => b[1].total - a[1].total);
   const srcs = Object.entries(stats.bySource || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
   const loans = Object.entries(stats.loansByPerson || {});
@@ -3093,7 +3174,7 @@ function Dashboard({
     className: "card-h"
   }, /*#__PURE__*/React.createElement("h3", null, periodLabel(period)), /*#__PURE__*/React.createElement("span", {
     className: "sub"
-  }, "mis ingresos y gastos")), /*#__PURE__*/React.createElement("div", {
+  }, "tu plata real")), /*#__PURE__*/React.createElement("div", {
     className: "split"
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "k"
@@ -3103,7 +3184,7 @@ function Dashboard({
     className: "k"
   }, "Salió"), /*#__PURE__*/React.createElement("div", {
     className: "v num tone-exp"
-  }, fmt(m.gastos))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }, fmt(m.salidas))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "k"
   }, "Balance"), /*#__PURE__*/React.createElement("div", {
     className: "v num " + (m.balance >= 0 ? "tone-inc" : "tone-exp")
@@ -3115,7 +3196,7 @@ function Dashboard({
     }
   })), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, m.ingresos > 0 ? `Gastaste el ${Math.round(m.gastos / m.ingresos * 100)}% de lo que entró este mes.` : m.gastos > 0 ? "Este mes hay gastos pero aún no registras ingresos." : "Sin movimientos registrados este mes.", " Las compras con tarjeta cuentan completas el mes en que las hiciste."))), /*#__PURE__*/React.createElement("div", {
+  }, "Salió = gastos con tu plata ", fmt(m.gastos), " + pagos a la tarjeta ", fmt(m.pagoTarjeta), ". ", m.ingresos > 0 ? `Usaste el ${Math.round(m.salidas / m.ingresos * 100)}% de lo que entró.` : m.salidas > 0 ? "Aún no registras ingresos este mes." : "", " Las compras con tarjeta se ven abajo, en la tarjeta."))), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-3 stats3",
     style: {
       marginBottom: 16
@@ -3559,35 +3640,7 @@ function AppInner() {
   // ─── Monthly trends (all time) ───
   const trends = useMemo(() => {
     try {
-      if (!data) return [];
-      const monthMap = {};
-      const ensure = p => {
-        if (!p) return {
-          ingresos: 0,
-          gastos: 0
-        };
-        if (!monthMap[p]) monthMap[p] = {
-          period: p,
-          ingresos: 0,
-          gastos: 0
-        };
-        return monthMap[p];
-      };
-      // My income per month
-      (data.incomes || []).filter(i => i.owner === "Mío").forEach(i => {
-        const p = getPeriod(i.date);
-        if (p) ensure(p).ingresos += num(i.amount);
-      });
-      // My expenses per month: every purchase counts in full in the month it was made (card included)
-      (data.expenses || []).filter(e => e.paidWith === "Mío" || !e.paidWith).forEach(e => {
-        const p = getPeriod(e.date);
-        if (p) ensure(p).gastos += num(e.amount);
-      });
-      return Object.values(monthMap).filter(m => m.period).sort((a, b) => a.period.localeCompare(b.period)).map(m => ({
-        ...m,
-        balance: m.ingresos - m.gastos,
-        label: periodLabel(m.period)
-      }));
+      return data ? computeTrends(data) : [];
     } catch (e) {
       console.error("trends error", e);
       return [];
@@ -4107,7 +4160,8 @@ function AppInner() {
       item: l
     })
   }), view === "trends" && /*#__PURE__*/React.createElement(TrendsView, {
-    trends: trends
+    trends: trends,
+    cardDebt: stats.cardDebt
   }), view === "settings" && /*#__PURE__*/React.createElement(SettingsView, {
     theme: theme,
     setTheme: setTheme,
