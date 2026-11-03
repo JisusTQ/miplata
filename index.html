@@ -3115,7 +3115,7 @@ function Dashboard({
     }
   })), /*#__PURE__*/React.createElement("div", {
     className: "hint"
-  }, m.ingresos > 0 ? `Gastaste el ${Math.round(m.gastos / m.ingresos * 100)}% de lo que entró este mes.` : m.gastos > 0 ? "Este mes hay gastos pero aún no registras ingresos." : "Sin movimientos registrados este mes.", " Aquí las compras a cuotas cuentan solo la cuota de cada mes."))), /*#__PURE__*/React.createElement("div", {
+  }, m.ingresos > 0 ? `Gastaste el ${Math.round(m.gastos / m.ingresos * 100)}% de lo que entró este mes.` : m.gastos > 0 ? "Este mes hay gastos pero aún no registras ingresos." : "Sin movimientos registrados este mes.", " Las compras con tarjeta cuentan completas el mes en que las hiciste."))), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-3 stats3",
     style: {
       marginBottom: 16
@@ -3578,21 +3578,10 @@ function AppInner() {
         const p = getPeriod(i.date);
         if (p) ensure(p).ingresos += num(i.amount);
       });
-      // My expenses per month (cash/debit, not credit card)
-      (data.expenses || []).filter(e => (e.paidWith === "Mío" || !e.paidWith) && e.method !== "Tarjeta crédito").forEach(e => {
+      // My expenses per month: every purchase counts in full in the month it was made (card included)
+      (data.expenses || []).filter(e => e.paidWith === "Mío" || !e.paidWith).forEach(e => {
         const p = getPeriod(e.date);
         if (p) ensure(p).gastos += num(e.amount);
-      });
-      // Credit card cuotas spread across months
-      (data.expenses || []).filter(e => e.method === "Tarjeta crédito").forEach(e => {
-        const c = safeCuotas(e.cuotas);
-        const sp = getPeriod(e.date);
-        if (!sp) return;
-        const val = cuotaAmount(e);
-        for (let i = 0; i < c; i++) {
-          const mp = addMonths(sp, i);
-          if (mp) ensure(mp).gastos += val;
-        }
       });
       return Object.values(monthMap).filter(m => m.period).sort((a, b) => a.period.localeCompare(b.period)).map(m => ({
         ...m,
